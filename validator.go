@@ -1,6 +1,9 @@
 package creditcard
 
-import "strconv"
+import (
+	"slices"
+	"strconv"
+)
 
 // matches reports whether the leading digits of number satisfy p. A number
 // shorter than the pattern still matches as long as the digits present agree,
@@ -47,14 +50,7 @@ func (b *brand) allowsLength(length int) bool {
 		return true
 	}
 
-	max := 0
-	for _, l := range b.Lengths {
-		if l > max {
-			max = l
-		}
-	}
-
-	return length <= max
+	return length <= slices.Max(b.Lengths)
 }
 
 // matchStrength returns the length of the longest pattern in the brand that

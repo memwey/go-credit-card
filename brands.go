@@ -1,5 +1,7 @@
 package creditcard
 
+import "slices"
+
 // Brand ids reported in Company.Short by Method and MethodValidate. The first
 // group is credit-card-type's own ids, reported verbatim; the second is the
 // brands this package adds on top of upstream.
@@ -72,7 +74,7 @@ func SpecFor(brand string) (Spec, bool) {
 	for i := range brands {
 		if brands[i].Short == brand {
 			return Spec{
-				Lengths: append([]int(nil), brands[i].Lengths...),
+				Lengths: slices.Clone(brands[i].Lengths),
 				Code:    brands[i].Code,
 			}, true
 		}
@@ -84,7 +86,7 @@ func SpecFor(brand string) (Spec, bool) {
 
 	if spec, ok := legacySpecs[brand]; ok {
 		return Spec{
-			Lengths: append([]int(nil), spec.Lengths...),
+			Lengths: slices.Clone(spec.Lengths),
 			Code:    spec.Code,
 		}, true
 	}

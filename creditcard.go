@@ -3,6 +3,7 @@ package creditcard
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 )
 
@@ -194,15 +195,7 @@ func (c *Card) ValidateNumber() bool {
 	numberLen := len(c.Number)
 
 	if b := bestMatch(c.Number); b != nil && len(b.Lengths) > 0 {
-		valid := false
-		for _, l := range b.Lengths {
-			if l == numberLen {
-				valid = true
-				break
-			}
-		}
-
-		if !valid {
+		if !slices.Contains(b.Lengths, numberLen) {
 			return false
 		}
 	} else if numberLen < 13 || numberLen > 19 {

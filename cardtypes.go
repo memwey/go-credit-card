@@ -1,5 +1,7 @@
 package creditcard
 
+import "slices"
+
 //go:generate go run ./internal/gen
 
 // SecurityCode describes a brand's verification code the way the issuing
@@ -35,4 +37,4 @@ type brand struct {
 //
 // Order only breaks ties between patterns of equal specificity; a longer
 // matching pattern always wins regardless of position.
-var brands = append(append([]brand{}, upstreamBrands...), extraBrands...)
+var brands = slices.Concat(upstreamBrands, extraBrands)

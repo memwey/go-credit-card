@@ -1,7 +1,7 @@
 package creditcard
 
 import (
-	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -425,7 +425,7 @@ func TestSpecFor(t *testing.T) {
 				t.Fatalf("SpecFor(%q) reported the brand as unknown", tc.brand)
 			}
 
-			if !reflect.DeepEqual(spec.Lengths, tc.lengths) {
+			if !slices.Equal(spec.Lengths, tc.lengths) {
 				t.Errorf("Lengths = %v, want %v", spec.Lengths, tc.lengths)
 			}
 
