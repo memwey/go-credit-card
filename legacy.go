@@ -1,7 +1,6 @@
 package creditcard
 
 import (
-	"errors"
 	"strings"
 )
 
@@ -43,6 +42,8 @@ var legacySpecs = map[string]Spec{
 // LegacyMethod is LegacyCompany's counterpart to Method: it attaches the
 // legacy company to the card instead of returning it.
 func (c *Card) LegacyMethod() error {
+	c.Company = Company{}
+
 	company, err := c.LegacyCompany()
 	if err != nil {
 		return err
@@ -74,7 +75,7 @@ func (c *Card) LegacyMethod() error {
 //     capped Diners Club at 14 digits and reported it as unknown.
 func (c *Card) LegacyCompany() (Company, error) {
 	if !isDigits(c.Number) {
-		return Company{}, errors.New("Unknown credit card method")
+		return Company{}, ErrUnknownMethod
 	}
 
 	// Prefixes the upstream table no longer carries. HasPrefix rather than

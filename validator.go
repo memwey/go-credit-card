@@ -62,6 +62,13 @@ func (b *brand) matchStrength(number string) (int, bool) {
 		return 0, false
 	}
 
+	return b.prefixMatchStrength(number)
+}
+
+// prefixMatchStrength is matchStrength without the type-as-you-go maximum
+// length cutoff. Final validation needs this form: a number that starts with a
+// known brand does not become an unknown brand merely because it is too long.
+func (b *brand) prefixMatchStrength(number string) (int, bool) {
 	strength, matched := 0, false
 
 	for _, p := range b.Patterns {
@@ -77,6 +84,27 @@ func (b *brand) matchStrength(number string) (int, bool) {
 	}
 
 	return strength, matched
+}
+
+// bestPrefixMatch identifies a brand from its patterns without discarding it
+// when number exceeds the brand's maximum length. Validation uses this helper
+// so an overlong known-brand number is checked against that brand's lengths
+// instead of falling back to the generic unknown-brand rule.
+func bestPrefixMatch(number string) *brand {
+	var best *brand
+	bestStrength := -1
+
+	for i := range brands {
+		strength, matched := brands[i].prefixMatchStrength(number)
+		if !matched || strength <= bestStrength {
+			continue
+		}
+
+		best = &brands[i]
+		bestStrength = strength
+	}
+
+	return best
 }
 
 // bestMatch returns the brand whose longest matching pattern is the most

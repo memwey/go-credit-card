@@ -1,10 +1,10 @@
+// Package creditcard provides credit-card brand identification and validation.
 package creditcard
 
 import (
-	"errors"
-	"fmt"
 	"slices"
 	"strconv"
+	"time"
 )
 
 // Card holds generic information about the credit card
@@ -20,10 +20,46 @@ type Company struct {
 	Short, Long string
 }
 
+// blockedTestNumbers is a compatibility blocklist, not an authoritative list
+// of every test number supported by every payment provider. Gateways remain
+// responsible for separating their live and test environments.
+var blockedTestNumbers = map[string]struct{}{
+	"4242424242424242": {},
+	"4012888888881881": {},
+	"4000056655665556": {},
+	"5555555555554444": {},
+	"5200828282828210": {},
+	"5105105105105100": {},
+	"378282246310005":  {},
+	"371449635398431":  {},
+	"6011111111111117": {},
+	"6011000990139424": {},
+	"30569309025904":   {},
+	"38520000023237":   {},
+	"3530111333300000": {},
+	"3566002020360505": {},
+	"4111111111111111": {},
+	"4916909992637469": {},
+	"4000111111111115": {},
+	"2223000048400011": {},
+	"6035227716427021": {},
+
+	// Stripe cards that simulate common decline and processing outcomes.
+	"4000000000000002": {},
+	"4000000000009995": {},
+	"4000000000009987": {},
+	"4000000000009979": {},
+	"4000000000000069": {},
+	"4000000000000127": {},
+	"4000000000000119": {},
+	"4000000000006975": {},
+	"4000000000000341": {},
+}
+
 // LastFour returns the last four digits of the credit card's number
 func (c *Card) LastFour() (string, error) {
 	if len(c.Number) < 4 {
-		return "", errors.New("Credit card number is not long enough")
+		return "", ErrNumberTooShort
 	}
 
 	return c.Number[len(c.Number)-4 : len(c.Number)], nil
@@ -40,89 +76,70 @@ func (c *Card) Wipe() {
 }
 
 // Validate returns nil or an error describing why the credit card didn't validate
-// this method checks for expiration date, CCV/CVV and the credit card's numbers.
-// For allowing test cards to go through, simply pass true (bool) as the first argument
+// this method checks for expiration date, the credit card's number, and CCV/CVV.
+// Numbers in the package's compatibility test-number blocklist are rejected by
+// default. To allow those numbers, pass true as the first argument; an allowed
+// number is then validated like any other. This local blocklist does not replace
+// a payment gateway's live/test environment controls.
 func (c *Card) Validate(allowTestNumbers ...bool) error {
 	err := c.ValidateExpiration()
 	if err != nil {
 		return err
 	}
 
-	err = c.ValidateCVV()
-	if err != nil {
-		return err
+	allowTest := len(allowTestNumbers) > 0 && allowTestNumbers[0]
+	if _, blocked := blockedTestNumbers[c.Number]; blocked && !allowTest {
+		return ErrTestNumberNotAllowed
 	}
 
-	switch c.Number {
-	// test cards: https://stripe.com/docs/testing
-	case "4242424242424242",
-		"4012888888881881",
-		"4000056655665556",
-		"5555555555554444",
-		"5200828282828210",
-		"5105105105105100",
-		"378282246310005",
-		"371449635398431",
-		"6011111111111117",
-		"6011000990139424",
-		"30569309025904",
-		"38520000023237",
-		"3530111333300000",
-		"3566002020360505",
-		"4111111111111111",
-		"4916909992637469",
-		"4000111111111115",
-		"2223000048400011",
-		"6035227716427021":
-		if len(allowTestNumbers) > 0 && allowTestNumbers[0] {
-			return nil
-		}
-
-		return errors.New("Test numbers are not allowed")
+	if !c.ValidateNumber() {
+		return ErrInvalidNumber
 	}
 
-	valid := c.ValidateNumber()
-
-	if !valid {
-		return errors.New("Invalid credit card number")
-	}
-
-	return nil
+	return c.ValidateCVV()
 }
 
-// validates the credit card's expiration date
+// ValidateExpiration validates the card's expiration date against the current
+// UTC month.
 func (c *Card) ValidateExpiration() error {
+	return c.validateExpiration(time.Now().UTC())
+}
+
+// validateExpiration is the deterministic core used by ValidateExpiration and
+// its boundary tests. Keeping the clock as a parameter avoids mutable package
+// state and guarantees that one validation uses a single instant.
+func (c *Card) validateExpiration(now time.Time) error {
 	var year, month int
 	var err error
-	timeNow := timeNowCaller()
+	now = now.UTC()
 
 	if len(c.Year) < 3 {
-		year, err = strconv.Atoi(strconv.Itoa(timeNow.UTC().Year())[:2] + c.Year)
+		year, err = strconv.Atoi(strconv.Itoa(now.Year())[:2] + c.Year)
 		if err != nil {
-			return errors.New("Invalid year")
+			return ErrInvalidYear
 		}
 	} else {
 		year, err = strconv.Atoi(c.Year)
 		if err != nil {
-			return errors.New("Invalid year")
+			return ErrInvalidYear
 		}
 	}
 
 	month, err = strconv.Atoi(c.Month)
 	if err != nil {
-		return errors.New("Invalid month")
+		return ErrInvalidMonth
 	}
 
 	if month < 1 || 12 < month {
-		return errors.New("Invalid month")
+		return ErrInvalidMonth
 	}
 
-	if year < timeNowCaller().UTC().Year() {
-		return errors.New("Credit card has expired")
+	if year < now.Year() {
+		return ErrExpired
 	}
 
-	if year == timeNowCaller().UTC().Year() && month < int(timeNowCaller().UTC().Month()) {
-		return errors.New("Credit card has expired")
+	if year == now.Year() && month < int(now.Month()) {
+		return ErrExpired
 	}
 
 	return nil
@@ -134,19 +151,19 @@ func (c *Card) ValidateExpiration() error {
 // brand can be identified the generic 3-4 digit rule is used.
 func (c *Card) ValidateCVV() error {
 	if !isDigits(c.Cvv) {
-		return errors.New("Invalid CVV")
+		return ErrInvalidCVV
 	}
 
-	if b := bestMatch(c.Number); b != nil && b.Code.Size > 0 {
+	if b := bestPrefixMatch(c.Number); b != nil && b.Code.Size > 0 {
 		if len(c.Cvv) != b.Code.Size {
-			return fmt.Errorf("Invalid %s: %s requires %d digits", b.Code.Name, b.Long, b.Code.Size)
+			return &SecurityCodeError{Name: b.Code.Name, Brand: b.Long, Required: b.Code.Size}
 		}
 
 		return nil
 	}
 
 	if len(c.Cvv) < 3 || len(c.Cvv) > 4 {
-		return errors.New("Invalid CVV")
+		return ErrInvalidCVV
 	}
 
 	return nil
@@ -155,6 +172,8 @@ func (c *Card) ValidateCVV() error {
 // Method returns an error from MethodValidate() or returns the
 // credit card with it's company / issuer attached to it
 func (c *Card) Method() error {
+	c.Company = Company{}
+
 	company, err := c.MethodValidate()
 
 	if err != nil {
@@ -170,12 +189,12 @@ func (c *Card) Method() error {
 // pattern wins.
 func (c *Card) MethodValidate() (Company, error) {
 	if !isDigits(c.Number) {
-		return Company{}, errors.New("Unknown credit card method")
+		return Company{}, ErrUnknownMethod
 	}
 
 	b := bestMatch(c.Number)
 	if b == nil {
-		return Company{}, errors.New("Unknown credit card method")
+		return Company{}, ErrUnknownMethod
 	}
 
 	return Company{Short: b.Short, Long: b.Long}, nil
@@ -194,7 +213,7 @@ func (c *Card) ValidateNumber() bool {
 
 	numberLen := len(c.Number)
 
-	if b := bestMatch(c.Number); b != nil && len(b.Lengths) > 0 {
+	if b := bestPrefixMatch(c.Number); b != nil && len(b.Lengths) > 0 {
 		if !slices.Contains(b.Lengths, numberLen) {
 			return false
 		}

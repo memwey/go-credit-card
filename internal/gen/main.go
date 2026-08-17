@@ -26,7 +26,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// httpClient bounds each sync request so a hung connection cannot stall
+// go generate indefinitely.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 const rawURL = "https://raw.githubusercontent.com/braintree/credit-card-type/v%s/src/%s"
 
@@ -75,7 +80,7 @@ func main() {
 func fetch(version, path string) (string, error) {
 	url := fmt.Sprintf(rawURL, version, path)
 
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -164,6 +169,8 @@ func parseCards(src string) ([]card, error) {
 
 		if m := niceTypeRe.FindStringSubmatch(body); m != nil {
 			c.niceType = m[1]
+		} else {
+			return nil, fmt.Errorf("%s: no niceType field", c.typ)
 		}
 
 		raw, err := extractPatterns(body)
@@ -179,14 +186,33 @@ func parseCards(src string) ([]card, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%s lengths: %w", c.typ, err)
 			}
+		} else {
+			return nil, fmt.Errorf("%s: no lengths field", c.typ)
+		}
+
+		if len(c.lengths) == 0 {
+			return nil, fmt.Errorf("%s: empty lengths field", c.typ)
+		}
+
+		for _, length := range c.lengths {
+			if length <= 0 {
+				return nil, fmt.Errorf("%s: invalid card-number length %d", c.typ, length)
+			}
 		}
 
 		if m := codeNameRe.FindStringSubmatch(body); m != nil {
 			c.codeName = m[1]
+		} else {
+			return nil, fmt.Errorf("%s: no security-code name field", c.typ)
 		}
 
 		if m := codeSizeRe.FindStringSubmatch(body); m != nil {
-			c.codeSize, _ = strconv.Atoi(m[1])
+			c.codeSize, err = strconv.Atoi(m[1])
+			if err != nil || c.codeSize <= 0 {
+				return nil, fmt.Errorf("%s: invalid security-code size %q", c.typ, m[1])
+			}
+		} else {
+			return nil, fmt.Errorf("%s: no security-code size field", c.typ)
 		}
 
 		cards = append(cards, c)
@@ -398,6 +424,10 @@ func parseTestOrder(src string) ([]string, error) {
 func sortByTestOrder(cards []card, order []string) ([]card, error) {
 	byType := make(map[string]card, len(cards))
 	for _, c := range cards {
+		if _, duplicate := byType[c.typ]; duplicate {
+			return nil, fmt.Errorf("card-types.ts defines %q more than once", c.typ)
+		}
+
 		byType[c.typ] = c
 	}
 

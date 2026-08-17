@@ -1,6 +1,7 @@
 package creditcard
 
 import (
+	"errors"
 	"slices"
 	"strconv"
 	"testing"
@@ -19,11 +20,11 @@ func TestLastFour(t *testing.T) {
 		name    string
 		number  string
 		want    string
-		wantErr bool
+		wantErr error
 	}{
-		{"sixteen digits", "4012888888881881", "1881", false},
-		{"exactly four digits", "1881", "1881", false},
-		{"fewer than four digits", "123", "", true},
+		{"sixteen digits", "4012888888881881", "1881", nil},
+		{"exactly four digits", "1881", "1881", nil},
+		{"fewer than four digits", "123", "", ErrNumberTooShort},
 	}
 
 	for _, tc := range tests {
@@ -31,8 +32,8 @@ func TestLastFour(t *testing.T) {
 			card := Card{Number: tc.number}
 
 			got, err := card.LastFour()
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("LastFour() error = %v, wantErr %v", err, tc.wantErr)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("LastFour() error = %v, want errors.Is(_, %v)", err, tc.wantErr)
 			}
 
 			if got != tc.want {
@@ -41,7 +42,7 @@ func TestLastFour(t *testing.T) {
 
 			// LastFourDigits is an alias and must agree.
 			alias, aliasErr := card.LastFourDigits()
-			if alias != got || (aliasErr != nil) != (err != nil) {
+			if alias != got || !errors.Is(aliasErr, tc.wantErr) {
 				t.Errorf("LastFourDigits() = %q, %v; want %q, %v", alias, aliasErr, got, err)
 			}
 		})
@@ -84,46 +85,37 @@ func TestValidateExpiration(t *testing.T) {
 	tests := []struct {
 		name        string
 		month, year string
-		wantErr     bool
+		wantErr     error
 	}{
-		{"year in the past", "02", "2001", true},
-		{"month zero", "0", nextYear, true},
-		{"month thirteen", "13", nextYear, true},
-		{"last month", strconv.Itoa(int(prevMonth)), strconv.Itoa(prevYear), true},
-		{"year is two letters", "1", "ab", true},
-		{"year is three letters", "1", "abc", true},
-		{"month is not a number", "abc", year, true},
-		{"two digit year", month, year[2:], false},
-		{"four digit year", month, year, false},
+		{"year in the past", "02", "2001", ErrExpired},
+		{"month zero", "0", nextYear, ErrInvalidMonth},
+		{"month thirteen", "13", nextYear, ErrInvalidMonth},
+		{"last month", strconv.Itoa(int(prevMonth)), strconv.Itoa(prevYear), ErrExpired},
+		{"year is two letters", "1", "ab", ErrInvalidYear},
+		{"year is three letters", "1", "abc", ErrInvalidYear},
+		{"month is not a number", "abc", year, ErrInvalidMonth},
+		{"two digit year", month, year[2:], nil},
+		{"four digit year", month, year, nil},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			card := Card{Number: "4012888888881881", Cvv: "111", Month: tc.month, Year: tc.year}
 
-			if err := card.ValidateExpiration(); (err != nil) != tc.wantErr {
-				t.Errorf("ValidateExpiration() error = %v, wantErr %v", err, tc.wantErr)
+			if err := card.ValidateExpiration(); !errors.Is(err, tc.wantErr) {
+				t.Errorf("ValidateExpiration() error = %v, want errors.Is(_, %v)", err, tc.wantErr)
 			}
 		})
 	}
 }
 
-func TestValidateExpirationMockedClock(t *testing.T) {
-	defer resetMocks()
-
-	timeNowCaller = func() time.Time {
-		return time.Date(2001, 3, 1, 1, 1, 1, 1, time.UTC)
-	}
-
+func TestValidateExpirationAtFixedTime(t *testing.T) {
+	now := time.Date(2001, 3, 1, 1, 1, 1, 1, time.UTC)
 	card := Card{Number: "4012888888881881", Cvv: "111", Month: "02", Year: "2001"}
 
-	err := card.ValidateExpiration()
-	if err == nil {
-		t.Fatal("ValidateExpiration() = nil, want an error for a card that expired last month")
-	}
-
-	if err.Error() != "Credit card has expired" {
-		t.Errorf("ValidateExpiration() = %q, want %q", err.Error(), "Credit card has expired")
+	err := card.validateExpiration(now)
+	if !errors.Is(err, ErrExpired) {
+		t.Fatalf("ValidateExpiration() = %v, want errors.Is(_, ErrExpired)", err)
 	}
 }
 
@@ -132,28 +124,28 @@ func TestValidateCVV(t *testing.T) {
 		name    string
 		number  string
 		cvv     string
-		wantErr bool
+		wantErr error
 	}{
-		{"three digits on Visa", "4012888888881881", "111", false},
-		{"four digits on Visa", "4012888888881881", "1111", true},
-		{"four digits on American Express", "378282246310005", "1111", false},
-		{"three digits on American Express", "378282246310005", "111", true},
-		{"too many digits", "4012888888881881", "11111", true},
-		{"too few digits", "4012888888881881", "11", true},
-		{"not digits at all", "4012888888881881", "abc", true},
+		{"three digits on Visa", "4012888888881881", "111", nil},
+		{"four digits on Visa", "4012888888881881", "1111", ErrInvalidCVV},
+		{"four digits on American Express", "378282246310005", "1111", nil},
+		{"three digits on American Express", "378282246310005", "111", ErrInvalidCVV},
+		{"too many digits", "4012888888881881", "11111", ErrInvalidCVV},
+		{"too few digits", "4012888888881881", "11", ErrInvalidCVV},
+		{"not digits at all", "4012888888881881", "abc", ErrInvalidCVV},
 		// No brand match, so the generic three-or-four rule applies.
-		{"unknown brand accepts three", "1234", "111", false},
-		{"unknown brand accepts four", "1234", "1111", false},
-		{"unknown brand rejects five", "1234", "11111", true},
-		{"no number yet", "", "111", false},
+		{"unknown brand accepts three", "1234", "111", nil},
+		{"unknown brand accepts four", "1234", "1111", nil},
+		{"unknown brand rejects five", "1234", "11111", ErrInvalidCVV},
+		{"no number yet", "", "111", nil},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			card := Card{Number: tc.number, Cvv: tc.cvv}
 
-			if err := card.ValidateCVV(); (err != nil) != tc.wantErr {
-				t.Errorf("ValidateCVV() error = %v, wantErr %v", err, tc.wantErr)
+			if err := card.ValidateCVV(); !errors.Is(err, tc.wantErr) {
+				t.Errorf("ValidateCVV() error = %v, want errors.Is(_, %v)", err, tc.wantErr)
 			}
 		})
 	}
@@ -167,6 +159,10 @@ func TestValidateNumber(t *testing.T) {
 	}{
 		{"Visa sixteen digits", "4012888888881881", true},
 		{"Visa seventeen digits", "40128888888818818", false},
+		// Overlong numbers must retain their known brand during validation;
+		// otherwise they can fall through to the generic 13-19 digit rule.
+		{"Mastercard over maximum length", "51000000000000003", false},
+		{"American Express over maximum length", "34000000000000009", false},
 		{"real Visa", "4556974850403706", true},
 		{"fails Luhn", "4242424242424241", false},
 		{"too short for any brand", "424832", false},
@@ -201,24 +197,24 @@ func TestValidate(t *testing.T) {
 	t.Run("rejects an expired card before looking at anything else", func(t *testing.T) {
 		card := Card{Number: "4556974850403706", Cvv: "111", Month: "02", Year: "2001"}
 
-		if err := card.Validate(); err == nil {
-			t.Error("Validate() = nil, want an error")
+		if err := card.Validate(); !errors.Is(err, ErrExpired) {
+			t.Errorf("Validate() = %v, want errors.Is(_, ErrExpired)", err)
 		}
 	})
 
 	t.Run("rejects a CVV the brand does not use", func(t *testing.T) {
 		card := Card{Number: "4556974850403706", Cvv: "1111", Month: month, Year: year}
 
-		if err := card.Validate(); err == nil {
-			t.Error("Validate() = nil, want an error for a 4 digit CVV on Visa")
+		if err := card.Validate(); !errors.Is(err, ErrInvalidCVV) {
+			t.Errorf("Validate() = %v, want errors.Is(_, ErrInvalidCVV)", err)
 		}
 	})
 
 	t.Run("rejects a number that is too short", func(t *testing.T) {
 		card := Card{Number: "1234", Cvv: "1111", Month: month, Year: year}
 
-		if err := card.Validate(true); err == nil {
-			t.Error("Validate(true) = nil, want an error")
+		if err := card.Validate(true); !errors.Is(err, ErrInvalidNumber) {
+			t.Errorf("Validate(true) = %v, want errors.Is(_, ErrInvalidNumber)", err)
 		}
 	})
 
@@ -226,8 +222,28 @@ func TestValidate(t *testing.T) {
 		// 17 digits, but Visa only issues 16, 18 or 19.
 		card := Card{Number: "40128888888818818", Cvv: "111", Month: month, Year: year}
 
-		if err := card.Validate(true); err == nil {
-			t.Error("Validate(true) = nil, want an error")
+		if err := card.Validate(true); !errors.Is(err, ErrInvalidNumber) {
+			t.Errorf("Validate(true) = %v, want errors.Is(_, ErrInvalidNumber)", err)
+		}
+	})
+
+	t.Run("rejects an overlong known brand instead of using the generic rule", func(t *testing.T) {
+		card := Card{Number: "51000000000000003", Cvv: "111", Month: month, Year: year}
+
+		if err := card.Validate(); !errors.Is(err, ErrInvalidNumber) {
+			t.Errorf("Validate() = %v, want errors.Is(_, ErrInvalidNumber)", err)
+		}
+	})
+
+	t.Run("reports an invalid number before an invalid CVV", func(t *testing.T) {
+		// The number is 17 digits where American Express issues 15, and the
+		// 3 digit CVV is wrong for American Express too. The number is the
+		// more useful error, and naming a brand for a number that brand would
+		// never issue misleads.
+		card := Card{Number: "34000000000000009", Cvv: "111", Month: month, Year: year}
+
+		if err := card.Validate(); !errors.Is(err, ErrInvalidNumber) {
+			t.Errorf("Validate() = %v, want errors.Is(_, ErrInvalidNumber)", err)
 		}
 	})
 }
@@ -251,6 +267,17 @@ func TestValidateTestNumbers(t *testing.T) {
 		{"38520000023237", "111"},
 		{"3530111333300000", "111"},
 		{"3566002020360505", "111"},
+		// Stripe's documented generic-decline test card used to fall through
+		// the compatibility blocklist and validate as an ordinary Visa.
+		{"4000000000000002", "111"},
+		{"4000000000009995", "111"},
+		{"4000000000009987", "111"},
+		{"4000000000009979", "111"},
+		{"4000000000000069", "111"},
+		{"4000000000000127", "111"},
+		{"4000000000000119", "111"},
+		{"4000000000006975", "111"},
+		{"4000000000000341", "111"},
 	}
 
 	for _, tc := range cards {
@@ -261,11 +288,26 @@ func TestValidateTestNumbers(t *testing.T) {
 				t.Errorf("Validate(true) = %v, want nil", err)
 			}
 
-			if err := card.Validate(); err == nil {
-				t.Error("Validate() = nil, want test numbers to be rejected")
+			if err := card.Validate(); !errors.Is(err, ErrTestNumberNotAllowed) {
+				t.Errorf("Validate() = %v, want errors.Is(_, ErrTestNumberNotAllowed)", err)
 			}
 		})
 	}
+
+	t.Run("allowed test numbers still pass the number checks", func(t *testing.T) {
+		// The blocklist gates policy, not validation: an allowed entry that
+		// fails Luhn or the brand's lengths must still be rejected.
+		const luhnInvalid = "4242424242424241"
+
+		blockedTestNumbers[luhnInvalid] = struct{}{}
+		defer delete(blockedTestNumbers, luhnInvalid)
+
+		card := Card{Number: luhnInvalid, Cvv: "111", Month: month, Year: year}
+
+		if err := card.Validate(true); !errors.Is(err, ErrInvalidNumber) {
+			t.Errorf("Validate(true) = %v, want errors.Is(_, ErrInvalidNumber)", err)
+		}
+	})
 }
 
 func TestMethod(t *testing.T) {
@@ -381,14 +423,30 @@ func TestMethodUnknown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			card := Card{Number: tc.number}
 
-			if err := card.Method(); err == nil {
-				t.Fatal("Method() = nil, want an error")
+			if err := card.Method(); !errors.Is(err, ErrUnknownMethod) {
+				t.Fatalf("Method() = %v, want errors.Is(_, ErrUnknownMethod)", err)
 			}
 
 			if card.Company.Short != "" || card.Company.Long != "" {
 				t.Errorf("Company = %+v, want it left empty", card.Company)
 			}
 		})
+	}
+}
+
+func TestMethodClearsAStaleCompanyOnFailure(t *testing.T) {
+	card := Card{Number: "4242424242424242"}
+	if err := card.Method(); err != nil {
+		t.Fatalf("first Method() = %v, want nil", err)
+	}
+
+	card.Number = "not-a-card"
+	if err := card.Method(); !errors.Is(err, ErrUnknownMethod) {
+		t.Fatalf("second Method() = %v, want errors.Is(_, ErrUnknownMethod)", err)
+	}
+
+	if card.Company != (Company{}) {
+		t.Errorf("Company = %+v after failed identification, want empty", card.Company)
 	}
 }
 
@@ -689,8 +747,8 @@ func TestLegacyCompanyUnknown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			card := Card{Number: tc.number}
 
-			if _, err := card.LegacyCompany(); err == nil {
-				t.Error("LegacyCompany() = nil, want an error")
+			if _, err := card.LegacyCompany(); !errors.Is(err, ErrUnknownMethod) {
+				t.Errorf("LegacyCompany() = %v, want errors.Is(_, ErrUnknownMethod)", err)
 			}
 		})
 	}
@@ -720,8 +778,24 @@ func TestLegacyMethod(t *testing.T) {
 	t.Run("propagates errors", func(t *testing.T) {
 		card := Card{Number: "1112424242"}
 
-		if err := card.LegacyMethod(); err == nil {
-			t.Error("LegacyMethod() = nil, want an error")
+		if err := card.LegacyMethod(); !errors.Is(err, ErrUnknownMethod) {
+			t.Errorf("LegacyMethod() = %v, want errors.Is(_, ErrUnknownMethod)", err)
+		}
+	})
+
+	t.Run("clears a stale company on failure", func(t *testing.T) {
+		card := Card{Number: "378282246310005"}
+		if err := card.LegacyMethod(); err != nil {
+			t.Fatalf("first LegacyMethod() = %v, want nil", err)
+		}
+
+		card.Number = "not-digits"
+		if err := card.LegacyMethod(); !errors.Is(err, ErrUnknownMethod) {
+			t.Fatalf("second LegacyMethod() = %v, want errors.Is(_, ErrUnknownMethod)", err)
+		}
+
+		if card.Company != (Company{}) {
+			t.Errorf("Company = %+v after failed identification, want empty", card.Company)
 		}
 	})
 }

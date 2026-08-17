@@ -29,6 +29,9 @@ diverged substantially:
   names for callers that need them.
 - `Validate`, `ValidateCVV` and `ValidateNumber` apply the identified brand's
   rules instead of a blanket 13-19 digit / 3-4 digit CVV check.
+- Error messages follow Go conventions — lowercase, no trailing punctuation
+  (`"invalid year"`, not `"Invalid year"`). Callers that match error text
+  verbatim need updating.
 - Mir, Hiper, Troy and Verve were added; several wrong Elo ranges, a dead Maestro
   prefix check and a Diners Club length check were fixed.
 - Tests use the standard library and cover 100% of statements.
@@ -54,15 +57,43 @@ spec, ok := creditcard.SpecFor(card.Company.Short)
 // Last four digits, for display
 lastFour, err := card.LastFour() // "4242"
 
-// Expiry, CVV and number in one call
-err := card.Validate()     // rejects known test numbers
-err := card.Validate(true) // allows them
+// Expiry, number and CVV in one call
+err = card.Validate()     // rejects numbers on the compatibility test-card blocklist
+err = card.Validate(true) // allows numbers on that blocklist
 ```
 
 `Validate`, `ValidateCVV` and `ValidateNumber` use the identified brand's own
 rules — American Express wants exactly 15 digits and a 4 digit CID, Visa wants
 16, 18 or 19 digits and a 3 digit CVV, and so on. Numbers matching no known brand
 fall back to the generic 13-19 digit and 3-4 digit CVV rules.
+
+The test-number check is an intentionally finite compatibility blocklist. It
+does not identify every test number from every payment provider and must not be
+used to separate production from sandbox traffic; use the payment gateway's
+live/test credentials and environment controls for that boundary.
+
+## Error handling
+
+Validation and identification errors expose stable sentinel values for
+`errors.Is`, including `ErrInvalidNumber`, `ErrExpired`, `ErrInvalidCVV` and
+`ErrUnknownMethod`:
+
+```go
+if errors.Is(err, creditcard.ErrExpired) {
+	// Ask for a different card.
+}
+```
+
+A brand-specific CVV failure is also a `*creditcard.SecurityCodeError`, so its
+details are available through `errors.As` while it still matches
+`ErrInvalidCVV`:
+
+```go
+var codeErr *creditcard.SecurityCodeError
+if errors.As(err, &codeErr) {
+	// codeErr.Name, codeErr.Brand, codeErr.Required
+}
+```
 
 `Company` holds only `Short` and `Long`, so it and `Card` stay comparable and
 usable as map keys. Per-brand lengths and security codes are static facts about
@@ -163,7 +194,7 @@ callers written against durango/go-credit-card keep working while they migrate:
 card := creditcard.Card{Number: "3782822463"}
 
 err := card.Method()       // card.Company.Short == "american-express"
-err := card.LegacyMethod() // card.Company.Short == "amex"
+err = card.LegacyMethod()  // card.Company.Short == "amex"
 ```
 
 | Original | Now | Constants |
