@@ -1,109 +1,122 @@
 package creditcard
 
-func isAmex(ccDigits digits) bool {
-	return matchesValue(ccDigits.At(2), []int{34, 37})
+import "strconv"
+
+// matches reports whether the leading digits of number satisfy p. A number
+// shorter than the pattern still matches as long as the digits present agree,
+// which is what makes type-as-you-go identification work.
+//
+// The algorithm follows credit-card-type's src/lib/matches.ts.
+func (p pattern) matches(number string) bool {
+	if number == "" {
+		return false
+	}
+
+	n := len(p.Min)
+	if len(number) < n {
+		n = len(number)
+	}
+
+	if p.Max == "" {
+		return p.Min[:n] == number[:n]
+	}
+
+	got, err := strconv.Atoi(number[:n])
+	if err != nil {
+		return false
+	}
+
+	lo, err := strconv.Atoi(p.Min[:n])
+	if err != nil {
+		return false
+	}
+
+	hi, err := strconv.Atoi(p.Max[:n])
+	if err != nil {
+		return false
+	}
+
+	return got >= lo && got <= hi
 }
 
-func isBankCard(ccDigits digits) bool {
-	return ccDigits.At(4) == 5610 || isInBetween(ccDigits.At(6), 560221, 560225)
+// allowsLength reports whether number's length is compatible with the brand.
+// A number still being typed is compatible with anything up to the brand's
+// longest form; a number past that length can no longer belong to the brand.
+func (b *brand) allowsLength(length int) bool {
+	if len(b.Lengths) == 0 {
+		return true
+	}
+
+	max := 0
+	for _, l := range b.Lengths {
+		if l > max {
+			max = l
+		}
+	}
+
+	return length <= max
 }
 
-func isCabal(ccDigits digits) bool {
-	atSix := ccDigits.At(6)
+// matchStrength returns the length of the longest pattern in the brand that
+// number matches, and whether the brand matched at all. Strength is only
+// counted once number is at least as long as the pattern, mirroring
+// credit-card-type's matchStrength: until then the match is not yet conclusive.
+func (b *brand) matchStrength(number string) (int, bool) {
+	if !b.allowsLength(len(number)) {
+		return 0, false
+	}
 
-	return matchesValue(atSix, []int{604400, 627170, 603522, 589657}) ||
-		isInBetween(atSix, 604201, 604219) ||
-		isInBetween(atSix, 604300, 604399)
+	strength, matched := 0, false
+
+	for _, p := range b.Patterns {
+		if !p.matches(number) {
+			continue
+		}
+
+		matched = true
+
+		if len(number) >= len(p.Min) && len(p.Min) > strength {
+			strength = len(p.Min)
+		}
+	}
+
+	return strength, matched
 }
 
-func isUnionPay(ccDigits digits) bool {
-	return matchesValue(ccDigits.At(2), []int{62, 81})
+// bestMatch returns the brand whose longest matching pattern is the most
+// specific. Ties are broken by the order of the brands table.
+//
+// This replaces the fixed switch-case precedence the package used before, so a
+// specific six- or eight-digit BIN now always beats a broad two-digit prefix
+// regardless of which brand happens to be checked first.
+func bestMatch(number string) *brand {
+	var best *brand
+	bestStrength := -1
+
+	for i := range brands {
+		strength, matched := brands[i].matchStrength(number)
+		if !matched || strength <= bestStrength {
+			continue
+		}
+
+		best = &brands[i]
+		bestStrength = strength
+	}
+
+	return best
 }
 
-func isDinersClubCarteBlanche(ccDigits digits, ccLen int) bool {
-	return isInBetween(ccDigits.At(3), 300, 305) && ccLen == 14
-}
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
 
-func isDinersClubEnroute(ccDigits digits) bool {
-	return matchesValue(ccDigits.At(4), []int{2014, 2149})
-}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
 
-func isDinersClubInternational(ccDigits digits, ccLen int) bool {
-	checkThree := isInBetween(ccDigits.At(3), 300, 305) || ccDigits.At(3) == 309
-	checkTwoo := matchesValue(ccDigits.At(2), []int{36, 38, 39})
-
-	return (checkThree || checkTwoo) && ccLen <= 14
-}
-
-func isDiscover(ccDigits digits) bool {
-	return ccDigits.At(4) == 6011 ||
-		isInBetween(ccDigits.At(6), 622126, 622925) ||
-		isInBetween(ccDigits.At(3), 644, 649) ||
-		ccDigits.At(2) == 65
-}
-
-func isElo(ccDigits digits) bool {
-	atFour := ccDigits.At(4)
-	atSix := ccDigits.At(6)
-
-	return matchesValue(atFour, []int{4011, 4576}) ||
-		matchesValue(atSix, []int{431274, 438935, 451416, 457393, 457631, 457632, 504175, 627780, 636297, 636368, 636369}) ||
-		isInBetween(atSix, 506699, 506778) ||
-		isInBetween(atSix, 509000, 509999) ||
-		isInBetween(atSix, 650031, 650051) ||
-		isInBetween(atSix, 650035, 650033) ||
-		isInBetween(atSix, 650405, 650439) ||
-		isInBetween(atSix, 650485, 650538) ||
-		isInBetween(atSix, 650541, 650598) ||
-		isInBetween(atSix, 650700, 650718) ||
-		isInBetween(atSix, 650720, 650727) ||
-		isInBetween(atSix, 650901, 650920) ||
-		isInBetween(atSix, 651652, 651679) ||
-		isInBetween(atSix, 655000, 655019) ||
-		isInBetween(atSix, 655021, 655021)
-}
-
-func isHipercard(ccDigits digits) bool {
-	return matchesValue(ccDigits.At(6), []int{606282, 637095, 637568, 637599, 637609, 637612})
-}
-
-func isInterpayment(ccDigits digits, ccLen int) bool {
-	return ccDigits.At(3) == 636 && isInBetween(ccLen, 16, 19)
-}
-
-func isInstapayment(ccDigits digits, ccLen int) bool {
-	return isInBetween(ccDigits.At(3), 637, 639) && ccLen == 16
-}
-
-func isJCB(ccDigits digits) bool {
-	return isInBetween(ccDigits.At(4), 3528, 3589)
-}
-
-func isNaranja(ccDigits digits) bool {
-	return ccDigits.At(6) == 589562
-}
-
-func isMaestro(c *Card, ccDigits digits) bool {
-	return matchesValue(ccDigits.At(4), []int{5018, 5020, 5038, 5612, 5893, 6304, 6759, 6761, 6762, 6763, 6390}) ||
-		c.Number[:3] == "0604"
-}
-
-func isDankort(ccDigits digits) bool {
-	return ccDigits.At(4) == 5019
-}
-
-func isMasterCard(ccDigits digits) bool {
-	return isInBetween(ccDigits.At(2), 51, 55) || isInBetween(ccDigits.At(6), 222100, 272099)
-}
-
-func isVisaElectron(ccDigits digits) bool {
-	return matchesValue(ccDigits.At(4), []int{4026, 4405, 4508, 4844, 4913, 4917}) || ccDigits.At(6) == 417500
-}
-
-func isVisa(ccDigits digits) bool {
-	return ccDigits.At(1) == 4
-}
-
-func isAura(ccDigits digits) bool {
-	return ccDigits.At(2) == 50
+	return true
 }

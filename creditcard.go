@@ -2,6 +2,7 @@ package creditcard
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 )
 
@@ -11,16 +12,11 @@ type Card struct {
 	Company                  Company
 }
 
-// Company holds a short and long names of who has issued the credit card
+// Company holds a short and long names of who has issued the credit card.
+// Short is the brand id -- one of the constants in brands.go. For the number
+// lengths and security code the brand uses, pass Short to SpecFor.
 type Company struct {
 	Short, Long string
-}
-
-type digits [6]int
-
-// At returns the digits from the start to the given length
-func (d *digits) At(i int) int {
-	return d[i-1]
 }
 
 // LastFour returns the last four digits of the credit card's number
@@ -131,8 +127,23 @@ func (c *Card) ValidateExpiration() error {
 	return nil
 }
 
-// validates the length of the card's CVV value
+// ValidateCVV validates the card's security code. When the number is long
+// enough to identify a brand, the brand's own rule applies: American Express
+// requires a 4 digit CID, most other networks require exactly 3 digits. When no
+// brand can be identified the generic 3-4 digit rule is used.
 func (c *Card) ValidateCVV() error {
+	if !isDigits(c.Cvv) {
+		return errors.New("Invalid CVV")
+	}
+
+	if b := bestMatch(c.Number); b != nil && b.Code.Size > 0 {
+		if len(c.Cvv) != b.Code.Size {
+			return fmt.Errorf("Invalid %s: %s requires %d digits", b.Code.Name, b.Long, b.Code.Size)
+		}
+
+		return nil
+	}
+
 	if len(c.Cvv) < 3 || len(c.Cvv) > 4 {
 		return errors.New("Invalid CVV")
 	}
@@ -153,81 +164,53 @@ func (c *Card) Method() error {
 	return nil
 }
 
-// MethodValidate adds/checks/verifies the credit card's company / issuer
+// MethodValidate adds/checks/verifies the credit card's company / issuer.
+// When several brands claim the number, the one matching on the longest BIN
+// pattern wins.
 func (c *Card) MethodValidate() (Company, error) {
-	var err error
-	ccLen := len(c.Number)
-	ccDigits := digits{}
-
-	for i := 0; i < 6; i++ {
-		if i < ccLen {
-			ccDigits[i], err = strconv.Atoi(c.Number[:i+1])
-			if err != nil {
-				return Company{"", ""}, errors.New("Unknown credit card method")
-			}
-		}
+	if !isDigits(c.Number) {
+		return Company{}, errors.New("Unknown credit card method")
 	}
 
-	switch {
-	case isAmex(ccDigits):
-		return Company{"amex", "American Express"}, nil
-	case isBankCard(ccDigits):
-		return Company{"bankcard", "Bankcard"}, nil
-	case isCabal(ccDigits):
-		return Company{"cabal", "Cabal"}, nil
-	case isUnionPay(ccDigits):
-		return Company{"china unionpay", "China UnionPay"}, nil
-	case isDinersClubCarteBlanche(ccDigits, ccLen):
-		return Company{"diners club carte blanche", "Diners Club Carte Blanche"}, nil
-	case isDinersClubEnroute(ccDigits):
-		return Company{"diners club enroute", "Diners Club enRoute"}, nil
-	case isDinersClubInternational(ccDigits, ccLen):
-		return Company{"diners club international", "Diners Club International"}, nil
-	case isDiscover(ccDigits):
-		return Company{"discover", "Discover"}, nil
-	// Elo must be checked before interpayment
-	case isElo(ccDigits):
-		return Company{"elo", "Elo"}, nil
-	case isHipercard(ccDigits):
-		return Company{"hipercard", "Hipercard"}, nil
-	case isInterpayment(ccDigits, ccLen):
-		return Company{"interpayment", "InterPayment"}, nil
-	case isInstapayment(ccDigits, ccLen):
-		return Company{"instapayment", "InstaPayment"}, nil
-	case isJCB(ccDigits):
-		return Company{"jcb", "JCB"}, nil
-	case isNaranja(ccDigits):
-		return Company{"naranja", "Naranja"}, nil
-	case isMaestro(c, ccDigits):
-		return Company{"maestro", "Maestro"}, nil
-	case isDankort(ccDigits):
-		return Company{"dankort", "Dankort"}, nil
-	case isMasterCard(ccDigits):
-		return Company{"mastercard", "MasterCard"}, nil
-	case isVisaElectron(ccDigits):
-		return Company{"visa electron", "Visa Electron"}, nil
-	case isVisa(ccDigits):
-		return Company{"visa", "Visa"}, nil
-	case isAura(ccDigits):
-		return Company{"aura", "Aura"}, nil
-	default:
-		return Company{"", ""}, errors.New("Unknown credit card method")
+	b := bestMatch(c.Number)
+	if b == nil {
+		return Company{}, errors.New("Unknown credit card method")
 	}
+
+	return Company{Short: b.Short, Long: b.Long}, nil
 }
 
 // Luhn algorithm
 // http://en.wikipedia.org/wiki/Luhn_algorithm
 
-// ValidateNumber will check the credit card's number against the Luhn algorithm
+// ValidateNumber will check the credit card's number against the Luhn
+// algorithm, and against the valid lengths of the brand it belongs to. Numbers
+// that match no known brand fall back to the generic 13-19 digit rule.
 func (c *Card) ValidateNumber() bool {
-	var sum int
-	var alternate bool
+	if !isDigits(c.Number) {
+		return false
+	}
 
 	numberLen := len(c.Number)
 
-	if numberLen < 13 || numberLen > 19 {
+	if b := bestMatch(c.Number); b != nil && len(b.Lengths) > 0 {
+		valid := false
+		for _, l := range b.Lengths {
+			if l == numberLen {
+				valid = true
+				break
+			}
+		}
+
+		if !valid {
+			return false
+		}
+	} else if numberLen < 13 || numberLen > 19 {
 		return false
 	}
+
+	var sum int
+	var alternate bool
 
 	for i := numberLen - 1; i > -1; i-- {
 		mod, _ := strconv.Atoi(string(c.Number[i]))
@@ -244,17 +227,4 @@ func (c *Card) ValidateNumber() bool {
 	}
 
 	return sum%10 == 0
-}
-
-func matchesValue(number int, numbers []int) bool {
-	for _, v := range numbers {
-		if v == number {
-			return true
-		}
-	}
-	return false
-}
-
-func isInBetween(n, min, max int) bool {
-	return n >= min && n <= max
 }
