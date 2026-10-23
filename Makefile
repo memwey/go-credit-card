@@ -1,5 +1,5 @@
 test:
-	go test -count=2 .
+	go test -count=2 ./...
 
 coverage:
 	go test -coverprofile=coverage.out .

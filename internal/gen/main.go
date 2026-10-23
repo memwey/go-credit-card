@@ -1,4 +1,4 @@
-// Command gen regenerates cardtypes_upstream.go from Braintree's
+// Command gen regenerates upstream.go from Braintree's
 // credit-card-type (https://github.com/braintree/credit-card-type, MIT).
 //
 // Usage:
@@ -6,13 +6,17 @@
 //	go generate ./...
 //	go run ./internal/gen -version 10.4.0
 //
-// The generated file holds upstream brands only. Brands this package adds on
-// top of upstream live in cardtypes_extra.go and are never touched here.
+// The generated file is the package's whole BIN table, and it holds upstream's
+// data exactly: no brand, range or rule is added, dropped or adjusted here.
+// Projects whose BIN data differs layer their own ranges on top with NewTable.
 //
-// Two upstream files are read. card-types.ts carries the BIN patterns, lengths
-// and security codes. index.ts carries ORIGINAL_TEST_ORDER, which decides which
-// brand wins when two patterns are equally specific -- Verve before Maestro,
-// for instance -- so the generated slice must preserve it.
+// Three upstream files are read. card-types.ts carries the BIN patterns,
+// lengths and security codes. index.ts carries ORIGINAL_TEST_ORDER, which
+// decides which brand wins when two patterns are equally specific -- Verve
+// before Maestro, for instance -- so the generated slice must preserve it.
+// LICENSE is upstream's MIT license: it is copied to LICENSE-credit-card-type
+// and its copyright line goes into the generated file's header, so the notice
+// MIT requires always matches the data it covers.
 package main
 
 import (
@@ -33,21 +37,37 @@ import (
 // go generate indefinitely.
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-const rawURL = "https://raw.githubusercontent.com/braintree/credit-card-type/v%s/src/%s"
+const rawURL = "https://raw.githubusercontent.com/braintree/credit-card-type/v%s/%s"
+
+// defaultVersion is the release "go generate" syncs from. Keep it equal to the
+// UpstreamVersion of the committed upstream.go -- a test checks -- or a plain
+// "go generate" would quietly rebuild an older table.
+const defaultVersion = "10.3.1"
 
 func main() {
-	version := flag.String("version", "10.3.0", "credit-card-type release to sync from")
-	out := flag.String("o", "cardtypes_upstream.go", "file to write")
+	version := flag.String("version", defaultVersion, "credit-card-type release to sync from")
+	out := flag.String("o", "upstream.go", "file to write")
+	licenseOut := flag.String("license", "LICENSE-credit-card-type", "file to copy upstream's license to")
 	flag.Parse()
 
-	types, err := fetch(*version, "lib/card-types.ts")
+	types, err := fetch(*version, "src/lib/card-types.ts")
 	if err != nil {
 		log.Fatalf("fetch card-types.ts: %v", err)
 	}
 
-	index, err := fetch(*version, "index.ts")
+	index, err := fetch(*version, "src/index.ts")
 	if err != nil {
 		log.Fatalf("fetch index.ts: %v", err)
+	}
+
+	license, err := fetch(*version, "LICENSE")
+	if err != nil {
+		log.Fatalf("fetch LICENSE: %v", err)
+	}
+
+	copyrights, err := parseCopyright(license)
+	if err != nil {
+		log.Fatalf("parse LICENSE: %v", err)
 	}
 
 	cards, err := parseCards(types)
@@ -65,13 +85,17 @@ func main() {
 		log.Fatal(err)
 	}
 
-	src, err := render(*version, ordered)
+	src, err := render(*version, copyrights, *licenseOut, ordered)
 	if err != nil {
 		log.Fatalf("render: %v", err)
 	}
 
 	if err := os.WriteFile(*out, src, 0o644); err != nil {
 		log.Fatalf("write %s: %v", *out, err)
+	}
+
+	if err := os.WriteFile(*licenseOut, []byte(license), 0o644); err != nil {
+		log.Fatalf("write %s: %v", *licenseOut, err)
 	}
 
 	fmt.Printf("wrote %s: %d brands from credit-card-type v%s\n", *out, len(ordered), *version)
@@ -98,28 +122,14 @@ func fetch(version, path string) (string, error) {
 	return string(body), nil
 }
 
-// splits replace one upstream pattern with several. Each entry needs a reason:
-// the generated file reproduces it as a comment so the deviation is visible at
-// the point it applies.
-var splits = []struct {
-	brand, min, max string
-	with            []pattern
-	reason          string
-}{{
-	brand: "maestro", min: "500000", max: "504174",
-	with: []pattern{{"500000", "501899"}, {"502000", "504174"}},
-	reason: "500000-504174 is split around 501900-501999 so Dankort keeps its own\n" +
-		"identity. Upstream already splits this range around Elo's 504175.",
-}}
-
 type pattern struct{ min, max string }
 
 func (p pattern) String() string {
 	if p.max == "" {
-		return fmt.Sprintf("prefix(%q)", p.min)
+		return fmt.Sprintf("Prefix(%q)", p.min)
 	}
 
-	return fmt.Sprintf("between(%q, %q)", p.min, p.max)
+	return fmt.Sprintf("Range(%q, %q)", p.min, p.max)
 }
 
 type card struct {
@@ -129,15 +139,7 @@ type card struct {
 	lengths  []int
 	codeName string
 	codeSize int
-	note     string
 }
-
-// Short and Long are reported verbatim from upstream so this package's brand
-// ids match credit-card-type's. Callers that need the names this package used
-// before the alignment can go through Card.LegacyCompany.
-func (c card) short() string { return c.typ }
-
-func (c card) long() string { return c.niceType }
 
 var (
 	blockRe    = regexp.MustCompile(`(?s)\{(.*?)\}\s*as BuiltInCreditCardType`)
@@ -159,7 +161,10 @@ func parseCards(src string) ([]card, error) {
 	for _, b := range blocks {
 		body := b[1]
 
-		c := card{}
+		var (
+			c   card
+			err error
+		)
 
 		if m := typeRe.FindStringSubmatch(body); m != nil {
 			c.typ = m[1]
@@ -173,13 +178,10 @@ func parseCards(src string) ([]card, error) {
 			return nil, fmt.Errorf("%s: no niceType field", c.typ)
 		}
 
-		raw, err := extractPatterns(body)
+		c.patterns, err = extractPatterns(body)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", c.typ, err)
 		}
-
-		c.patterns = applySplits(c.typ, raw)
-		c.note = splitNote(c.typ)
 
 		if m := lengthsRe.FindStringSubmatch(body); m != nil {
 			c.lengths, err = parseInts(m[1])
@@ -287,6 +289,12 @@ func parsePatternList(s string) ([]pattern, error) {
 				return nil, fmt.Errorf("range %s-%s has mismatched widths", bounds[0], bounds[1])
 			}
 
+			// Equal-width digit strings order the same as the numbers they
+			// spell. A backwards range could never match anything.
+			if bounds[0] > bounds[1] {
+				return nil, fmt.Errorf("range %s-%s runs backwards", bounds[0], bounds[1])
+			}
+
 			out = append(out, pattern{bounds[0], bounds[1]})
 			i += end + 1
 		default:
@@ -351,37 +359,27 @@ func parseInts(s string) ([]int, error) {
 	return out, nil
 }
 
-func applySplits(typ string, in []pattern) []pattern {
-	out := make([]pattern, 0, len(in))
+// parseCopyright returns every copyright line of upstream's MIT license, and
+// fails if the license is no longer MIT: the package's own license and the
+// notice in the generated file both assume it is.
+func parseCopyright(license string) ([]string, error) {
+	if !strings.Contains(license, "Permission is hereby granted, free of charge") {
+		return nil, fmt.Errorf("upstream LICENSE is no longer the MIT license; review it before syncing")
+	}
 
-	for _, p := range in {
-		replaced := false
+	var lines []string
 
-		for _, s := range splits {
-			if s.brand == typ && s.min == p.min && s.max == p.max {
-				out = append(out, s.with...)
-				replaced = true
-
-				break
-			}
-		}
-
-		if !replaced {
-			out = append(out, p)
+	for _, line := range strings.Split(license, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Copyright") {
+			lines = append(lines, line)
 		}
 	}
 
-	return out
-}
-
-func splitNote(typ string) string {
-	for _, s := range splits {
-		if s.brand == typ {
-			return s.reason
-		}
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("no copyright line in upstream LICENSE")
 	}
 
-	return ""
+	return lines, nil
 }
 
 // parseTestOrder resolves ORIGINAL_TEST_ORDER from index.ts through the
@@ -455,41 +453,32 @@ func sortByTestOrder(cards []card, order []string) ([]card, error) {
 	return out, nil
 }
 
-func render(version string, cards []card) ([]byte, error) {
+func render(version string, copyrights []string, licenseFile string, cards []card) ([]byte, error) {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, `// Code generated by "go run ./internal/gen"; DO NOT EDIT.
 //
-// Source: https://github.com/braintree/credit-card-type (MIT) v%s
+// Source: https://github.com/braintree/credit-card-type v%s
+// %s
+// MIT licensed; see %s.
 //
-// Brand order follows upstream's ORIGINAL_TEST_ORDER, which decides which brand
-// wins when two patterns are equally specific. Brands this package adds on top
-// of upstream live in cardtypes_extra.go.
+// Entry order follows upstream's ORIGINAL_TEST_ORDER, which decides which brand
+// wins when two ranges are equally specific.
 
 package creditcard
 
-// UpstreamVersion is the credit-card-type release the brand table below was
+// UpstreamVersion is the credit-card-type release the package table was
 // generated from. Bump it by regenerating, not by editing this file.
 const UpstreamVersion = %q
 
-var upstreamBrands = []brand{
-`, version, version)
+// upstream is the package table, the one Default returns.
+var upstream = []entry{
+`, version, strings.Join(copyrights, "\n// "), licenseFile, version)
 
 	for _, c := range cards {
-		fmt.Fprintf(&b, "\t{\n\t\tShort: %q,\n\t\tLong:  %q,\n", c.short(), c.long())
+		fmt.Fprintf(&b, "\t{\n\t\tBrand: %q,\n\t\tName:  %q,\n", c.typ, c.niceType)
 
-		if c.note != "" {
-			for i, line := range strings.Split(c.note, "\n") {
-				if i == 0 {
-					fmt.Fprintf(&b, "\t\t// DEVIATION: %s\n", line)
-					continue
-				}
-
-				fmt.Fprintf(&b, "\t\t// %s\n", line)
-			}
-		}
-
-		fmt.Fprintf(&b, "\t\tPatterns: []pattern{\n")
+		fmt.Fprintf(&b, "\t\tRanges: []BINRange{\n")
 		for _, p := range c.patterns {
 			fmt.Fprintf(&b, "\t\t\t%s,\n", p)
 		}
@@ -504,7 +493,7 @@ var upstreamBrands = []brand{
 		}
 		fmt.Fprintf(&b, "},\n")
 
-		fmt.Fprintf(&b, "\t\tCode: SecurityCode{%q, %d},\n\t},\n", c.codeName, c.codeSize)
+		fmt.Fprintf(&b, "\t\tCode:    SecurityCode{Name: %q, Size: %d},\n\t},\n", c.codeName, c.codeSize)
 	}
 
 	b.WriteString("}\n")
